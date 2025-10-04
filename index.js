@@ -2,16 +2,6 @@
 
 
 
-
-
-
-/* ============================================================
-   🚀 START SERVER
-============================================================ */
-app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
-
-
-
 // server/index.js
 import express from "express";
 import cors from "cors";
@@ -275,6 +265,7 @@ app.post("/agora/token", verifyAuth, (req, res) => {
 
 /* ============================================================
    📡 Live rooms
+   🔹 Ganancia 50/50 para Amora y host
 ============================================================ */
 app.get("/liveRooms", async (req, res) => {
   try {
@@ -317,25 +308,35 @@ app.post("/live/enter", async (req, res) => {
       const user = uSnap.data();
       if ((user.coins || 0) < (room.entryPrice || 0)) return res.status(400).json({ error: "Saldo insuficiente" });
 
+      // Descontar monedas del usuario
       await userRef.update({ coins: (user.coins || 0) - (room.entryPrice || 0) });
 
+      // Ganancia 50/50 entre host y Amora
       const hostRef = db.collection("users").doc(room.hostId);
       const hostSnap = await hostRef.get();
-      const hostEarn = Math.round((room.entryPrice || 0) * 0.7);
+      const hostEarn = Math.round((room.entryPrice || 0) * 0.5); // 50% para el host
+      const amoraEarn = (room.entryPrice || 0) - hostEarn; // 50% para Amora Live
+
       await hostRef.update({ earnedCoins: (hostSnap.data().earnedCoins || 0) + hostEarn });
 
+      // Guardamos la parte de Amora Live en transactions
       await db.collection("transactions").add({
-        uid, amount: room.entryPrice, type: "enter_live", roomId,
+        uid, amount: room.entryPrice,
+        hostEarn, amoraEarn,
+        type: "enter_live_50_50",
+        roomId,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       });
     }
 
+    // Actualizamos lista de espectadores
     const viewers = room.viewers || [];
     if (!viewers.includes(uid)) viewers.push(uid);
     await roomRef.update({ viewers });
 
     res.json({ ok: true });
   } catch (e) {
+    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -343,11 +344,9 @@ app.post("/live/enter", async (req, res) => {
 /* ============================================================
    🚀 START SERVER
 ============================================================ */
+app.get("/", (req, res) => {
+  res.send("✅ Servidor Amora Live está funcionando correctamente.");
+});
 app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
-
-
-
-
-
 
 
