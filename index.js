@@ -2,6 +2,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fs from "fs";
 import admin from "firebase-admin";
 import Stripe from "stripe";
 import bodyParser from "body-parser";
@@ -13,22 +14,22 @@ dotenv.config();
 const PORT = process.env.PORT || 4000;
 
 /* ============================================================
-   🔥 FIREBASE ADMIN (versión compatible con Render)
+   🔥 FIREBASE ADMIN (versión compatible con Render Secrets)
 ============================================================ */
 let serviceAccount;
 try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    // Cargamos desde variable de entorno
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-  } else {
-    throw new Error("❌ Variable FIREBASE_SERVICE_ACCOUNT_JSON no está definida");
-  }
+  // Leer desde el archivo secreto subido en Render
+  serviceAccount = JSON.parse(
+    fs.readFileSync("/etc/secrets/serviceAccountKey.json", "utf8")
+  );
 } catch (e) {
   console.error("❌ Error al cargar credenciales Firebase:", e.message);
   process.exit(1);
 }
 
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 const db = admin.firestore();
 
 /* ============================================================
@@ -68,8 +69,8 @@ const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 /* ============================================================
    💰 MODELO ECONÓMICO
 ============================================================ */
-const COINS_PER_USD = 8; // 1 USD = 8 coins
-const COIN_SECONDS = 2; // 1 coin = 2 segundos
+const COINS_PER_USD = 8;
+const COIN_SECONDS = 2;
 const HOST_SHARE = 0.5;
 const AMORA_SHARE = 0.5;
 
@@ -220,7 +221,6 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
 
     const coinsToAdd = amount * COINS_PER_USD;
     const userRef = db.collection("users").doc(uid);
-
     await userRef.update({ coins: admin.firestore.FieldValue.increment(coinsToAdd) });
 
     await db.collection("transactions").add({
@@ -353,5 +353,5 @@ app.post("/live/enter", async (req, res) => {
 app.get("/", (req, res) => {
   res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
-app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
 
+app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
