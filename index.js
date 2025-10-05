@@ -1,7 +1,3 @@
-
-
-
-
 // server/index.js
 import express from "express";
 import cors from "cors";
@@ -9,7 +5,6 @@ import dotenv from "dotenv";
 import admin from "firebase-admin";
 import Stripe from "stripe";
 import bodyParser from "body-parser";
-import fs from "fs";
 import pkg from "agora-access-token";
 const { RtcTokenBuilder, RtcRole } = pkg;
 import paypal from "@paypal/checkout-server-sdk";
@@ -18,13 +13,21 @@ dotenv.config();
 const PORT = process.env.PORT || 4000;
 
 /* ============================================================
-   🔥 FIREBASE ADMIN
+   🔥 FIREBASE ADMIN (versión compatible con Render)
 ============================================================ */
-const servicePath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || "./serviceAccountKey.json";
-if (!fs.existsSync(servicePath)) {
-  console.warn("⚠️ serviceAccountKey.json not found.");
+let serviceAccount;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    // Cargamos desde variable de entorno
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  } else {
+    throw new Error("❌ Variable FIREBASE_SERVICE_ACCOUNT_JSON no está definida");
+  }
+} catch (e) {
+  console.error("❌ Error al cargar credenciales Firebase:", e.message);
+  process.exit(1);
 }
-const serviceAccount = JSON.parse(fs.readFileSync(servicePath, "utf8"));
+
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
@@ -55,16 +58,18 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 /* ============================================================
    💳 PAYPAL
 ============================================================ */
-const paypalEnv = process.env.PAYPAL_MODE === "live"
-  ? new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_SECRET)
-  : new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_SECRET);
+const paypalEnv =
+  process.env.PAYPAL_MODE === "live"
+    ? new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_SECRET)
+    : new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_SECRET);
+
 const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 
 /* ============================================================
    💰 MODELO ECONÓMICO
 ============================================================ */
-const COINS_PER_USD = 8;   // 1 USD = 8 coins
-const COIN_SECONDS = 2;    // 1 coin = 2 segundos
+const COINS_PER_USD = 8; // 1 USD = 8 coins
+const COIN_SECONDS = 2; // 1 coin = 2 segundos
 const HOST_SHARE = 0.5;
 const AMORA_SHARE = 0.5;
 
@@ -117,7 +122,7 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
       freeCallSeconds: admin.firestore.FieldValue.increment(bonus.freeCallSeconds),
       freeLiveSeconds: admin.firestore.FieldValue.increment(bonus.freeLiveSeconds),
       lastBonusDay: diffDays,
-      bonusExpiry: admin.firestore.Timestamp.fromDate(expiry)
+      bonusExpiry: admin.firestore.Timestamp.fromDate(expiry),
     });
 
     await db.collection("transactions").add({
@@ -125,7 +130,7 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
       type: "daily_bonus",
       bonus,
       day: diffDays,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     res.json({ ok: true, bonus, day: diffDays, expiresAt: expiry });
@@ -153,7 +158,7 @@ app.post("/call/use", verifyAuth, async (req, res) => {
       await callerRef.update({
         freeCallSeconds: 0,
         freeLiveSeconds: 0,
-        bonusExpiry: admin.firestore.FieldValue.delete()
+        bonusExpiry: admin.firestore.FieldValue.delete(),
       });
     }
 
@@ -182,7 +187,7 @@ app.post("/call/use", verifyAuth, async (req, res) => {
       if (calleeSnap.exists) {
         const hostEarn = Math.round(coinsCharged * HOST_SHARE);
         await calleeRef.update({
-          earnedCoins: (calleeSnap.data().earnedCoins || 0) + hostEarn
+          earnedCoins: (calleeSnap.data().earnedCoins || 0) + hostEarn,
         });
       }
 
@@ -192,7 +197,7 @@ app.post("/call/use", verifyAuth, async (req, res) => {
         type: "call_charge",
         secondsCharged: remaining,
         coinsCharged,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
 
@@ -204,7 +209,7 @@ app.post("/call/use", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   💳 Confirmar pago unificado (Stripe o PayPal)
+   💳 Confirmar pago (Stripe o PayPal)
 ============================================================ */
 app.post("/payment/confirm", verifyAuth, async (req, res) => {
   try {
@@ -234,14 +239,14 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   🎥 AGORA: Generar token
+   🎥 AGORA TOKEN
 ============================================================ */
 app.post("/agora/token", verifyAuth, (req, res) => {
   const channelName = req.body.channelName || req.body.channel;
   const uid = req.body.uid;
 
   if (!channelName || !uid) {
-    return res.status(400).json({ error: "Faltan parámetros (channelName o channel, uid)" });
+    return res.status(400).json({ error: "Faltan parámetros (channelName o uid)" });
   }
 
   const appID = process.env.AGORA_APP_ID;
@@ -264,14 +269,13 @@ app.post("/agora/token", verifyAuth, (req, res) => {
 });
 
 /* ============================================================
-   📡 Live rooms
-   🔹 Ganancia 50/50 para Amora y host
+   📡 Live Rooms
 ============================================================ */
 app.get("/liveRooms", async (req, res) => {
   try {
     const snaps = await db.collection("liveRooms").where("isActive", "==", true).get();
     const rooms = [];
-    snaps.forEach(s => rooms.push({ id: s.id, ...s.data() }));
+    snaps.forEach((s) => rooms.push({ id: s.id, ...s.data() }));
     res.json(rooms);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -282,10 +286,13 @@ app.post("/live/create", async (req, res) => {
   try {
     const { hostId, hostName, hostGender, entryPrice } = req.body;
     const docRef = await db.collection("liveRooms").add({
-      hostId, hostName, hostGender, entryPrice,
+      hostId,
+      hostName,
+      hostGender,
+      entryPrice,
       viewers: [],
       startTime: admin.firestore.FieldValue.serverTimestamp(),
-      isActive: true
+      isActive: true,
     });
     res.json({ id: docRef.id });
   } catch (e) {
@@ -306,30 +313,29 @@ app.post("/live/enter", async (req, res) => {
       const uSnap = await userRef.get();
       if (!uSnap.exists) return res.status(400).json({ error: "Usuario no existe" });
       const user = uSnap.data();
-      if ((user.coins || 0) < (room.entryPrice || 0)) return res.status(400).json({ error: "Saldo insuficiente" });
+      if ((user.coins || 0) < (room.entryPrice || 0))
+        return res.status(400).json({ error: "Saldo insuficiente" });
 
-      // Descontar monedas del usuario
       await userRef.update({ coins: (user.coins || 0) - (room.entryPrice || 0) });
 
-      // Ganancia 50/50 entre host y Amora
       const hostRef = db.collection("users").doc(room.hostId);
       const hostSnap = await hostRef.get();
-      const hostEarn = Math.round((room.entryPrice || 0) * 0.5); // 50% para el host
-      const amoraEarn = (room.entryPrice || 0) - hostEarn; // 50% para Amora Live
+      const hostEarn = Math.round((room.entryPrice || 0) * 0.5);
+      const amoraEarn = (room.entryPrice || 0) - hostEarn;
 
       await hostRef.update({ earnedCoins: (hostSnap.data().earnedCoins || 0) + hostEarn });
 
-      // Guardamos la parte de Amora Live en transactions
       await db.collection("transactions").add({
-        uid, amount: room.entryPrice,
-        hostEarn, amoraEarn,
+        uid,
+        amount: room.entryPrice,
+        hostEarn,
+        amoraEarn,
         type: "enter_live_50_50",
         roomId,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
 
-    // Actualizamos lista de espectadores
     const viewers = room.viewers || [];
     if (!viewers.includes(uid)) viewers.push(uid);
     await roomRef.update({ viewers });
@@ -348,5 +354,4 @@ app.get("/", (req, res) => {
   res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
 app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
-
 
