@@ -238,6 +238,86 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
   }
 });
 
+
+
+/* ============================================================
+   💳 Crear sesión de pago (Stripe)
+============================================================ */
+app.post("/payment/create-session", verifyAuth, async (req, res) => {
+  try {
+    const { amount, uid } = req.body;
+    if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: `${amount * COINS_PER_USD} monedas Amora Live`,
+              description: "Recarga de monedas para llamadas y salas en vivo",
+            },
+            unit_amount: amount * 100, // Stripe usa centavos
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      success_url: `${process.env.FRONTEND_URL}/coins?success=true&uid=${uid}&amount=${amount}`,
+      cancel_url: `${process.env.FRONTEND_URL}/coins?cancel=true`,
+      metadata: { uid, amount },
+    });
+
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error("❌ Error creando sesión de pago Stripe:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+
+
+/* ============================================================
+   💳 Crear orden de pago (PayPal)
+============================================================ */
+app.post("/payment/create-order", verifyAuth, async (req, res) => {
+  try {
+    const { amount, uid } = req.body;
+    if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+
+    const request = new paypal.orders.OrdersCreateRequest();
+    request.prefer("return=representation");
+    request.requestBody({
+      intent: "CAPTURE",
+      purchase_units: [
+        {
+          amount: { currency_code: "USD", value: amount.toString() },
+          description: `${amount * COINS_PER_USD} monedas Amora Live`,
+        },
+      ],
+      application_context: {
+        return_url: `${process.env.FRONTEND_URL}/coins?paypal_success=true&uid=${uid}&amount=${amount}`,
+        cancel_url: `${process.env.FRONTEND_URL}/coins?paypal_cancel=true`,
+      },
+    });
+
+    const order = await paypalClient.execute(request);
+    res.json({ id: order.result.id, links: order.result.links });
+  } catch (e) {
+    console.error("❌ Error creando orden PayPal:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+
+
+
+
 /* ============================================================
    🎥 AGORA TOKEN
 ============================================================ */
