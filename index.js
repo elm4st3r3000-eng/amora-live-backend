@@ -1,3 +1,8 @@
+
+
+
+
+
 // server/index.js
 import express from "express";
 import cors from "cors";
@@ -14,11 +19,10 @@ dotenv.config();
 const PORT = process.env.PORT || 4000;
 
 /* ============================================================
-   🔥 FIREBASE ADMIN (versión compatible con Render Secrets)
+   FIREBASE ADMIN (Render secrets)
 ============================================================ */
 let serviceAccount;
 try {
-  // Leer desde el archivo secreto subido en Render
   serviceAccount = JSON.parse(
     fs.readFileSync("/etc/secrets/serviceAccountKey.json", "utf8")
   );
@@ -33,7 +37,7 @@ admin.initializeApp({
 const db = admin.firestore();
 
 /* ============================================================
-   🛡️ Middleware: verificar idToken de Firebase
+   Middleware: verificar idToken de Firebase
 ============================================================ */
 async function verifyAuth(req, res, next) {
   try {
@@ -52,13 +56,10 @@ async function verifyAuth(req, res, next) {
 }
 
 /* ============================================================
-   💳 STRIPE
+   Stripe / PayPal / Modelo económico
 ============================================================ */
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
-/* ============================================================
-   💳 PAYPAL
-============================================================ */
 const paypalEnv =
   process.env.PAYPAL_MODE === "live"
     ? new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_SECRET)
@@ -66,13 +67,10 @@ const paypalEnv =
 
 const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 
-/* ============================================================
-   💰 MODELO ECONÓMICO
-============================================================ */
-const COINS_PER_USD = 8;
-const COIN_SECONDS = 2;
-const HOST_SHARE = 0.5;
-const AMORA_SHARE = 0.5;
+const COINS_PER_USD = Number(process.env.COINS_PER_USD || 8);
+const COIN_SECONDS = Number(process.env.COIN_SECONDS || 2);
+const HOST_SHARE = Number(process.env.HOST_SHARE || 0.5);
+const AMORA_SHARE = Number(process.env.AMORA_SHARE || 0.5);
 
 function coinsCostForSeconds(seconds) {
   return Math.ceil(seconds / COIN_SECONDS);
@@ -83,13 +81,11 @@ app.use(cors());
 app.use(bodyParser.json());
 
 /* ============================================================
-   🎁 BONO DIARIO
+   RUTA: bono diario (usa uid del token)
 ============================================================ */
 app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
   try {
-    const { uid } = req.body;
-    if (!uid) return res.status(400).json({ error: "UID requerido" });
-
+    const uid = req.user.uid;
     const userRef = db.collection("users").doc(uid);
     const uSnap = await userRef.get();
     if (!uSnap.exists) return res.status(404).json({ error: "Usuario no encontrado" });
@@ -142,13 +138,71 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   📞 Llamadas 1 a 1
+   RUTA: bono inicial controlado (1 vez, configurable)
+   CONFIG: INITIAL_BONUS_COINS, INITIAL_FREE_CALL_SECONDS, INITIAL_FREE_LIVE_SECONDS
+============================================================ */
+app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const userRef = db.collection("users").doc(uid);
+    const uSnap = await userRef.get();
+    if (!uSnap.exists) return res.status(404).json({ error: "Usuario no encontrado" });
+    const user = uSnap.data();
+
+    if (user.initialBonusGranted) {
+      return res.status(400).json({ error: "Bono inicial ya otorgado" });
+    }
+
+    const initialCoins = Number(process.env.INITIAL_BONUS_COINS || 0);
+    const initialFreeCallSeconds = Number(process.env.INITIAL_FREE_CALL_SECONDS || 0);
+    const initialFreeLiveSeconds = Number(process.env.INITIAL_FREE_LIVE_SECONDS || 0);
+
+    if (initialCoins === 0 && initialFreeCallSeconds === 0 && initialFreeLiveSeconds === 0) {
+      return res.status(200).json({ ok: true, message: "No hay bono inicial configurado en el servidor." });
+    }
+
+    const updates = {};
+    if (initialCoins > 0) updates.coins = admin.firestore.FieldValue.increment(initialCoins);
+    if (initialFreeCallSeconds > 0) updates.freeCallSeconds = admin.firestore.FieldValue.increment(initialFreeCallSeconds);
+    if (initialFreeLiveSeconds > 0) updates.freeLiveSeconds = admin.firestore.FieldValue.increment(initialFreeLiveSeconds);
+
+    await userRef.update({
+      ...updates,
+      initialBonusGranted: true,
+      initialBonusAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    await db.collection("transactions").add({
+      uid,
+      type: "initial_bonus",
+      coins: initialCoins,
+      freeCallSeconds: initialFreeCallSeconds,
+      freeLiveSeconds: initialFreeLiveSeconds,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({
+      ok: true,
+      granted: { coins: initialCoins, freeCallSeconds: initialFreeCallSeconds, freeLiveSeconds: initialFreeLiveSeconds },
+    });
+  } catch (e) {
+    console.error("❌ Error en /user/grant-initial-bonus:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ============================================================
+   📞 Llamadas 1 a 1 (callerId debe coincidir con token)
 ============================================================ */
 app.post("/call/use", verifyAuth, async (req, res) => {
   try {
     const { callerId, calleeId, secondsUsed } = req.body;
     if (!callerId || !calleeId || !secondsUsed)
       return res.status(400).json({ error: "Faltan parámetros" });
+
+    // seguridad: callerId debe ser quien hace la petición
+    if (callerId !== req.user.uid)
+      return res.status(403).json({ error: "callerId no coincide con usuario autenticado" });
 
     const callerRef = db.collection("users").doc(callerId);
     const callerSnap = await callerRef.get();
@@ -210,7 +264,8 @@ app.post("/call/use", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   💳 Confirmar pago (Stripe o PayPal)
+   💳 Confirmar pago (mejor usar webhooks en producción)
+   -> Validar que uid coincida con token
 ============================================================ */
 app.post("/payment/confirm", verifyAuth, async (req, res) => {
   try {
@@ -219,7 +274,11 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros" });
     }
 
-    const coinsToAdd = amount * COINS_PER_USD;
+    if (uid !== req.user.uid) {
+      return res.status(403).json({ error: "UID no coincide con usuario autenticado" });
+    }
+
+    const coinsToAdd = Number(amount) * COINS_PER_USD;
     const userRef = db.collection("users").doc(uid);
     await userRef.update({ coins: admin.firestore.FieldValue.increment(coinsToAdd) });
 
@@ -238,15 +297,15 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
   }
 });
 
-
-
 /* ============================================================
-   💳 Crear sesión de pago (Stripe)
+   💳 Crear sesión Stripe (validar uid coincide)
 ============================================================ */
 app.post("/payment/create-session", verifyAuth, async (req, res) => {
   try {
     const { amount, uid } = req.body;
     if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+
+    if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -258,7 +317,7 @@ app.post("/payment/create-session", verifyAuth, async (req, res) => {
               name: `${amount * COINS_PER_USD} monedas Amora Live`,
               description: "Recarga de monedas para llamadas y salas en vivo",
             },
-            unit_amount: amount * 100, // Stripe usa centavos
+            unit_amount: amount * 100,
           },
           quantity: 1,
         },
@@ -276,17 +335,15 @@ app.post("/payment/create-session", verifyAuth, async (req, res) => {
   }
 });
 
-
-
-
-
 /* ============================================================
-   💳 Crear orden de pago (PayPal)
+   💳 Crear orden PayPal (validar uid coincide)
 ============================================================ */
 app.post("/payment/create-order", verifyAuth, async (req, res) => {
   try {
     const { amount, uid } = req.body;
     if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+
+    if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
 
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer("return=representation");
@@ -312,44 +369,42 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
   }
 });
 
-
-
-
-
-
-
 /* ============================================================
-   🎥 AGORA TOKEN
+   🎥 AGORA TOKEN (usar uid del token)
 ============================================================ */
 app.post("/agora/token", verifyAuth, (req, res) => {
-  const channelName = req.body.channelName || req.body.channel;
-  const uid = req.body.uid;
+  try {
+    const channelName = req.body.channelName || req.body.channel;
+    const uid = req.user.uid;
+    if (!channelName) {
+      return res.status(400).json({ error: "Falta channelName" });
+    }
 
-  if (!channelName || !uid) {
-    return res.status(400).json({ error: "Faltan parámetros (channelName o uid)" });
+    const appID = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERT;
+    const role = RtcRole.PUBLISHER;
+    const expirationTimeInSeconds = 3600;
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appID,
+      appCertificate,
+      channelName,
+      uid,
+      role,
+      privilegeExpiredTs
+    );
+
+    res.json({ token, expiresAt: privilegeExpiredTs });
+  } catch (e) {
+    console.error("❌ Error en /agora/token:", e);
+    res.status(500).json({ error: e.message });
   }
-
-  const appID = process.env.AGORA_APP_ID;
-  const appCertificate = process.env.AGORA_APP_CERT;
-  const role = RtcRole.PUBLISHER;
-  const expirationTimeInSeconds = 3600;
-  const currentTimestamp = Math.floor(Date.now() / 1000);
-  const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
-
-  const token = RtcTokenBuilder.buildTokenWithUid(
-    appID,
-    appCertificate,
-    channelName,
-    uid,
-    role,
-    privilegeExpiredTs
-  );
-
-  res.json({ token, expiresAt: privilegeExpiredTs });
 });
 
 /* ============================================================
-   📡 Live Rooms
+   📡 Live Rooms (protegidas)
 ============================================================ */
 app.get("/liveRooms", async (req, res) => {
   try {
@@ -362,9 +417,12 @@ app.get("/liveRooms", async (req, res) => {
   }
 });
 
-app.post("/live/create", async (req, res) => {
+app.post("/live/create", verifyAuth, async (req, res) => {
   try {
     const { hostId, hostName, hostGender, entryPrice } = req.body;
+    // hostId must match authenticated user
+    if (hostId !== req.user.uid) return res.status(403).json({ error: "hostId no coincide con usuario autenticado" });
+
     const docRef = await db.collection("liveRooms").add({
       hostId,
       hostName,
@@ -380,9 +438,12 @@ app.post("/live/create", async (req, res) => {
   }
 });
 
-app.post("/live/enter", async (req, res) => {
+app.post("/live/enter", verifyAuth, async (req, res) => {
   try {
-    const { roomId, uid } = req.body;
+    const { roomId } = req.body;
+    const uid = req.user.uid;
+    if (!roomId) return res.status(400).json({ error: "roomId requerido" });
+
     const roomRef = db.collection("liveRooms").doc(roomId);
     const snap = await roomRef.get();
     if (!snap.exists) return res.status(404).json({ error: "Sala no existe" });
@@ -400,7 +461,7 @@ app.post("/live/enter", async (req, res) => {
 
       const hostRef = db.collection("users").doc(room.hostId);
       const hostSnap = await hostRef.get();
-      const hostEarn = Math.round((room.entryPrice || 0) * 0.5);
+      const hostEarn = Math.round((room.entryPrice || 0) * HOST_SHARE);
       const amoraEarn = (room.entryPrice || 0) - hostEarn;
 
       await hostRef.update({ earnedCoins: (hostSnap.data().earnedCoins || 0) + hostEarn });
@@ -428,10 +489,17 @@ app.post("/live/enter", async (req, res) => {
 });
 
 /* ============================================================
-   🚀 START SERVER
+   START
 ============================================================ */
 app.get("/", (req, res) => {
   res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
 
 app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
+
+
+
+
+
+
+
