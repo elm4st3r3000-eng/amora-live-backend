@@ -77,8 +77,18 @@ function coinsCostForSeconds(seconds) {
 }
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+
+app.use(cors({
+  origin: [
+    "https://amora-live-famous.netlify.app",
+    "http://localhost:3000"
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
+}));
+
+
 
 /* ============================================================
    RUTA: bono diario (usa uid del token)
