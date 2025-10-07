@@ -1,8 +1,3 @@
-
-
-
-
-
 // server/index.js
 import express from "express";
 import cors from "cors";
@@ -22,10 +17,13 @@ const PORT = process.env.PORT || 4000;
    FIREBASE ADMIN (Render secrets)
 ============================================================ */
 let serviceAccount;
+
 try {
-  serviceAccount = JSON.parse(
-    fs.readFileSync("/etc/secrets/serviceAccountKey.json", "utf8")
-  );
+  const localPath = "./serviceAccountKey.json"; // archivo local
+  const renderPath = "/etc/secrets/serviceAccountKey.json"; // ruta en Render
+  const pathToUse = fs.existsSync(renderPath) ? renderPath : localPath;
+
+  serviceAccount = JSON.parse(fs.readFileSync(pathToUse, "utf8"));
 } catch (e) {
   console.error("❌ Error al cargar credenciales Firebase:", e.message);
   process.exit(1);
@@ -431,7 +429,8 @@ app.post("/live/create", verifyAuth, async (req, res) => {
   try {
     const { hostId, hostName, hostGender, entryPrice } = req.body;
     // hostId must match authenticated user
-    if (hostId !== req.user.uid) return res.status(403).json({ error: "hostId no coincide con usuario autenticado" });
+    if (hostId !== req.user.uid)
+      return res.status(403).json({ error: "hostId no coincide con usuario autenticado" });
 
     const docRef = await db.collection("liveRooms").add({
       hostId,
@@ -442,12 +441,13 @@ app.post("/live/create", verifyAuth, async (req, res) => {
       startTime: admin.firestore.FieldValue.serverTimestamp(),
       isActive: true,
     });
+
     res.json({ id: docRef.id });
   } catch (e) {
+    console.error("❌ Error al crear sala:", e);
     res.status(500).json({ error: e.message });
   }
 });
-
 app.post("/live/enter", verifyAuth, async (req, res) => {
   try {
     const { roomId } = req.body;
@@ -506,10 +506,3 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
-
-
-
-
-
-
-
