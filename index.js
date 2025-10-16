@@ -11,8 +11,8 @@ const { RtcTokenBuilder, RtcRole } = pkg;
 import paypal from "@paypal/checkout-server-sdk";
 
 dotenv.config();
-const PORT = process.env.PORT || 4000;
 
+const appCertificate = process.env.AGORA_APP_CERTIFICATE;
 /* ============================================================
    FIREBASE ADMIN (Render secrets)
 ============================================================ */
@@ -380,16 +380,21 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
 /* ============================================================
    🎥 AGORA TOKEN (usar uid del token)
 ============================================================ */
-app.post("/agora/token", verifyAuth, (req, res) => {
+app.get("/agora/token", async (req, res) => {
   try {
-    const channelName = req.body.channelName || req.body.channel;
-    const uid = req.user.uid;
-    if (!channelName) {
-      return res.status(400).json({ error: "Falta channelName" });
+    const { uid, channel } = req.query;
+
+    if (!uid || !channel) {
+      return res.status(400).json({ error: "Faltan parámetros uid o channel" });
     }
 
     const appID = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERT;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+
+    if (!appID || !appCertificate) {
+      return res.status(500).json({ error: "Faltan credenciales de Agora" });
+    }
+
     const role = RtcRole.PUBLISHER;
     const expirationTimeInSeconds = 3600;
     const currentTimestamp = Math.floor(Date.now() / 1000);
@@ -398,18 +403,19 @@ app.post("/agora/token", verifyAuth, (req, res) => {
     const token = RtcTokenBuilder.buildTokenWithUid(
       appID,
       appCertificate,
-      channelName,
-      uid,
+      channel,
+      parseInt(uid),
       role,
       privilegeExpiredTs
     );
 
-    res.json({ token, expiresAt: privilegeExpiredTs });
+    return res.json({ token, expiresAt: privilegeExpiredTs });
   } catch (e) {
     console.error("❌ Error en /agora/token:", e);
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
+
 
 /* ============================================================
    📡 Live Rooms (protegidas)
