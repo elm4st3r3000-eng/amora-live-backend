@@ -12,6 +12,7 @@ import paypal from "@paypal/checkout-server-sdk";
 
 dotenv.config();
 
+const PORT = process.env.PORT || 4000;
 const appCertificate = process.env.AGORA_APP_CERTIFICATE;
 /* ============================================================
    FIREBASE ADMIN (Render secrets)
