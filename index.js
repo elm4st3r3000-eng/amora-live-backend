@@ -13,31 +13,41 @@ import paypal from "@paypal/checkout-server-sdk";
 dotenv.config();
 
 const PORT = process.env.PORT || 4000;
-const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-/* ============================================================
-   FIREBASE ADMIN (Render secrets)
-============================================================ */
-let serviceAccount;
 
+// ============================================================
+// FIREBASE ADMIN (Render secrets)
+// ============================================================
+let serviceAccount;
 try {
   const localPath = "./serviceAccountKey.json"; // archivo local
   const renderPath = "/etc/secrets/serviceAccountKey.json"; // ruta en Render
   const pathToUse = fs.existsSync(renderPath) ? renderPath : localPath;
 
+  if (!fs.existsSync(pathToUse)) {
+    throw new Error(`No se encontró serviceAccountKey en ${pathToUse}`);
+  }
+
   serviceAccount = JSON.parse(fs.readFileSync(pathToUse, "utf8"));
 } catch (e) {
   console.error("❌ Error al cargar credenciales Firebase:", e.message);
-  process.exit(1);
+  // si quieres que el servidor no arranque sin las credenciales, deja process.exit(1)
+  // process.exit(1);
+  // En su lugar, sólo logeamos y permitimos que el servidor arranque para debug (opcional)
+  serviceAccount = null;
 }
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-const db = admin.firestore();
+if (serviceAccount) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+} else {
+  console.warn("⚠️ Firebase admin no inicializado: serviceAccountKey no disponible.");
+}
+const db = admin.firestore ? admin.firestore() : null;
 
-/* ============================================================
-   Middleware: verificar idToken de Firebase
-============================================================ */
+// ============================================================
+// Middleware: verificar idToken de Firebase
+// ============================================================
 async function verifyAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
@@ -45,19 +55,23 @@ async function verifyAuth(req, res, next) {
       return res.status(401).json({ error: "Token no proporcionado" });
     }
     const idToken = authHeader.split("Bearer ")[1];
+    if (!admin.apps.length) {
+      console.error("Firebase admin no inicializado - verifyAuth falla.");
+      return res.status(500).json({ error: "Servicio de autenticación no disponible" });
+    }
     const decoded = await admin.auth().verifyIdToken(idToken);
     req.user = decoded;
     next();
   } catch (error) {
-    console.error("❌ Error de autenticación:", error.message);
+    console.error("❌ Error de autenticación:", error && error.message ? error.message : error);
     return res.status(401).json({ error: "Token inválido o expirado" });
   }
 }
 
-/* ============================================================
-   Stripe / PayPal / Modelo económico
-============================================================ */
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+// ============================================================
+// Stripe / PayPal / Modelo económico
+// ============================================================
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const paypalEnv =
   process.env.PAYPAL_MODE === "live"
@@ -77,23 +91,37 @@ function coinsCostForSeconds(seconds) {
 
 const app = express();
 
-app.use(cors({
-  origin: [
-    "https://amora-live-famous.netlify.app",
-    "http://localhost:3000"
-  ],
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true,
-}));
+// ================== IMPORTANT: body parsing & cors ==================
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
+app.use(
+  cors({
+    origin: [
+      "https://amora-live-famous.netlify.app",
+      "http://localhost:3000",
+      // añade otros orígenes si los necesitas
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  })
+);
 
+// responder preflight (OPTIONS)
+app.options("*", (req, res) => {
+  res.sendStatus(200);
+});
 
-/* ============================================================
-   RUTA: bono diario (usa uid del token)
-============================================================ */
+// ============================================================
+// RUTAS
+// ============================================================
+
+/* RUTA: bono diario (usa uid del token) */
 app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
+
     const uid = req.user.uid;
     const userRef = db.collection("users").doc(uid);
     const uSnap = await userRef.get();
@@ -146,12 +174,11 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
   }
 });
 
-/* ============================================================
-   RUTA: bono inicial controlado (1 vez, configurable)
-   CONFIG: INITIAL_BONUS_COINS, INITIAL_FREE_CALL_SECONDS, INITIAL_FREE_LIVE_SECONDS
-============================================================ */
+/* RUTA: bono inicial controlado (1 vez, configurable) */
 app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
+
     const uid = req.user.uid;
     const userRef = db.collection("users").doc(uid);
     const uSnap = await userRef.get();
@@ -200,16 +227,15 @@ app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
   }
 });
 
-/* ============================================================
-   📞 Llamadas 1 a 1 (callerId debe coincidir con token)
-============================================================ */
+/* Llamadas 1 a 1 */
 app.post("/call/use", verifyAuth, async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
+
     const { callerId, calleeId, secondsUsed } = req.body;
     if (!callerId || !calleeId || !secondsUsed)
       return res.status(400).json({ error: "Faltan parámetros" });
 
-    // seguridad: callerId debe ser quien hace la petición
     if (callerId !== req.user.uid)
       return res.status(403).json({ error: "callerId no coincide con usuario autenticado" });
 
@@ -272,12 +298,11 @@ app.post("/call/use", verifyAuth, async (req, res) => {
   }
 });
 
-/* ============================================================
-   💳 Confirmar pago (mejor usar webhooks en producción)
-   -> Validar que uid coincida con token
-============================================================ */
+/* Confirmar pago */
 app.post("/payment/confirm", verifyAuth, async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
+
     const { uid, amount, method } = req.body;
     if (!uid || !amount || !method) {
       return res.status(400).json({ error: "Faltan parámetros" });
@@ -306,9 +331,7 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
   }
 });
 
-/* ============================================================
-   💳 Crear sesión Stripe (validar uid coincide)
-============================================================ */
+/* Crear sesión Stripe */
 app.post("/payment/create-session", verifyAuth, async (req, res) => {
   try {
     const { amount, uid } = req.body;
@@ -339,14 +362,12 @@ app.post("/payment/create-session", verifyAuth, async (req, res) => {
 
     res.json({ url: session.url });
   } catch (e) {
-    console.error("❌ Error creando sesión de pago Stripe:", e.message);
+    console.error("❌ Error creando sesión de pago Stripe:", e && e.message ? e.message : e);
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ============================================================
-   💳 Crear orden PayPal (validar uid coincide)
-============================================================ */
+/* Crear orden PayPal */
 app.post("/payment/create-order", verifyAuth, async (req, res) => {
   try {
     const { amount, uid } = req.body;
@@ -373,14 +394,12 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
     const order = await paypalClient.execute(request);
     res.json({ id: order.result.id, links: order.result.links });
   } catch (e) {
-    console.error("❌ Error creando orden PayPal:", e.message);
+    console.error("❌ Error creando orden PayPal:", e && e.message ? e.message : e);
     res.status(500).json({ error: e.message });
   }
 });
 
-/* ============================================================
-   🎥 AGORA TOKEN (usar uid del token)
-============================================================ */
+/* AGORA TOKEN: admite uid numérico y alfanumérico (user account) */
 app.get("/agora/token", async (req, res) => {
   try {
     const { uid, channel } = req.query;
@@ -401,14 +420,17 @@ app.get("/agora/token", async (req, res) => {
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
 
-    const token = RtcTokenBuilder.buildTokenWithUid(
-      appID,
-      appCertificate,
-      channel,
-      parseInt(uid),
-      role,
-      privilegeExpiredTs
-    );
+    let token;
+    const maybeNum = Number(uid);
+    if (!Number.isNaN(maybeNum) && String(maybeNum) === String(uid)) {
+      // uid es numérico
+      token = RtcTokenBuilder.buildTokenWithUid(appID, appCertificate, channel, parseInt(uid, 10), role, privilegeExpiredTs);
+    } else if (RtcTokenBuilder.buildTokenWithUserAccount) {
+      // uid es alfanumérico -> usar user account
+      token = RtcTokenBuilder.buildTokenWithUserAccount(appID, appCertificate, channel, uid, role, privilegeExpiredTs);
+    } else {
+      return res.status(400).json({ error: "UID no numérico y buildTokenWithUserAccount no disponible" });
+    }
 
     return res.json({ token, expiresAt: privilegeExpiredTs });
   } catch (e) {
@@ -417,12 +439,10 @@ app.get("/agora/token", async (req, res) => {
   }
 });
 
-
-/* ============================================================
-   📡 Live Rooms (protegidas)
-============================================================ */
+/* Live Rooms (públicas) */
 app.get("/liveRooms", async (req, res) => {
   try {
+    if (!db) return res.json([]);
     const snaps = await db.collection("liveRooms").where("isActive", "==", true).get();
     const rooms = [];
     snaps.forEach((s) => rooms.push({ id: s.id, ...s.data() }));
@@ -434,10 +454,10 @@ app.get("/liveRooms", async (req, res) => {
 
 app.post("/live/create", verifyAuth, async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
+
     const { hostId, hostName, hostGender, entryPrice } = req.body;
-    // hostId must match authenticated user
-    if (hostId !== req.user.uid)
-      return res.status(403).json({ error: "hostId no coincide con usuario autenticado" });
+    if (hostId !== req.user.uid) return res.status(403).json({ error: "hostId no coincide con usuario autenticado" });
 
     const docRef = await db.collection("liveRooms").add({
       hostId,
@@ -455,8 +475,11 @@ app.post("/live/create", verifyAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 app.post("/live/enter", verifyAuth, async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
+
     const { roomId } = req.body;
     const uid = req.user.uid;
     if (!roomId) return res.status(400).json({ error: "roomId requerido" });
@@ -471,8 +494,7 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
       const uSnap = await userRef.get();
       if (!uSnap.exists) return res.status(400).json({ error: "Usuario no existe" });
       const user = uSnap.data();
-      if ((user.coins || 0) < (room.entryPrice || 0))
-        return res.status(400).json({ error: "Saldo insuficiente" });
+      if ((user.coins || 0) < (room.entryPrice || 0)) return res.status(400).json({ error: "Saldo insuficiente" });
 
       await userRef.update({ coins: (user.coins || 0) - (room.entryPrice || 0) });
 
@@ -505,9 +527,7 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
   }
 });
 
-/* ============================================================
-   START
-============================================================ */
+/* START */
 app.get("/", (req, res) => {
   res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
