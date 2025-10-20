@@ -5,49 +5,76 @@ import dotenv from "dotenv";
 import fs from "fs";
 import admin from "firebase-admin";
 import Stripe from "stripe";
-import bodyParser from "body-parser";
 import pkg from "agora-access-token";
 const { RtcTokenBuilder, RtcRole } = pkg;
 import paypal from "@paypal/checkout-server-sdk";
 
 dotenv.config();
 
+// ------------------------------------------------------------
+// Config básica
+// ------------------------------------------------------------
 const PORT = process.env.PORT || 4000;
 
-// ============================================================
-// FIREBASE ADMIN (Render secrets)
-// ============================================================
-let serviceAccount;
+const app = express();
+
+// ------------------------------------------------------------
+// Inicializar Firebase Admin (soporta secrets montados en Render
+// en /etc/secrets/serviceAccountKey.json o archivo local para dev)
+// ------------------------------------------------------------
+let serviceAccount = null;
 try {
-  const localPath = "./serviceAccountKey.json"; // archivo local
-  const renderPath = "/etc/secrets/serviceAccountKey.json"; // ruta en Render
+  const localPath = "./serviceAccountKey.json";
+  const renderPath = "/etc/secrets/serviceAccountKey.json";
   const pathToUse = fs.existsSync(renderPath) ? renderPath : localPath;
 
   if (!fs.existsSync(pathToUse)) {
     throw new Error(`No se encontró serviceAccountKey en ${pathToUse}`);
   }
 
-  serviceAccount = JSON.parse(fs.readFileSync(pathToUse, "utf8"));
-} catch (e) {
-  console.error("❌ Error al cargar credenciales Firebase:", e.message);
-  // si quieres que el servidor no arranque sin las credenciales, deja process.exit(1)
-  // process.exit(1);
-  // En su lugar, sólo logeamos y permitimos que el servidor arranque para debug (opcional)
-  serviceAccount = null;
-}
+  const raw = fs.readFileSync(pathToUse, "utf8");
+  serviceAccount = JSON.parse(raw);
 
-if (serviceAccount) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
-} else {
-  console.warn("⚠️ Firebase admin no inicializado: serviceAccountKey no disponible.");
+
+  console.log("✅ Firebase Admin inicializado desde:", pathToUse);
+} catch (e) {
+  console.error("❌ Error al cargar credenciales Firebase:", e && e.message ? e.message : e);
+  serviceAccount = null;
+  console.warn("⚠️ Firebase admin no inicializado: serviceAccountKey no disponible. Algunas rutas requerirán Firestore.");
 }
+
 const db = admin.firestore ? admin.firestore() : null;
 
-// ============================================================
+// ------------------------------------------------------------
+// Middlewares: body parsing y CORS
+// ------------------------------------------------------------
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use(
+  cors({
+    origin: [
+      "https://amora-live-famous.netlify.app",
+      "http://localhost:3000",
+      // agrega otros frontends si los necesitas
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  })
+);
+
+// responder preflight (OPTIONS)
+app.options("*", (req, res) => {
+  res.sendStatus(200);
+});
+
+// ------------------------------------------------------------
 // Middleware: verificar idToken de Firebase
-// ============================================================
+// ------------------------------------------------------------
 async function verifyAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
@@ -68,9 +95,9 @@ async function verifyAuth(req, res, next) {
   }
 }
 
-// ============================================================
-// Stripe / PayPal / Modelo económico
-// ============================================================
+// ------------------------------------------------------------
+// Stripe / PayPal / Constantes del modelo económico
+// ------------------------------------------------------------
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const paypalEnv =
@@ -89,33 +116,14 @@ function coinsCostForSeconds(seconds) {
   return Math.ceil(seconds / COIN_SECONDS);
 }
 
-const app = express();
+// ------------------------------------------------------------
+// RUTAS (tu lógica existente, sin cambios funcionales salvo /agora/token)
+// ------------------------------------------------------------
 
-// ================== IMPORTANT: body parsing & cors ==================
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-app.use(
-  cors({
-    origin: [
-      "https://amora-live-famous.netlify.app",
-      "http://localhost:3000",
-      // añade otros orígenes si los necesitas
-    ],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-  })
-);
-
-// responder preflight (OPTIONS)
-app.options("*", (req, res) => {
-  res.sendStatus(200);
+// Ejemplo: root health
+app.get("/", (req, res) => {
+  res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
-
-// ============================================================
-// RUTAS
-// ============================================================
 
 /* RUTA: bono diario (usa uid del token) */
 app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
@@ -399,43 +407,51 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
   }
 });
 
-/* AGORA TOKEN: admite uid numérico y alfanumérico (user account) */
+/* AGORA TOKEN: admite channelName o channel, uid numérico o string (user account) */
 app.get("/agora/token", async (req, res) => {
   try {
-    const { uid, channel } = req.query;
+    // aceptar channelName (frontend actual) o channel (por compatibilidad)
+    const channel = req.query.channelName || req.query.channel;
+    const uid = req.query.uid;
 
-    if (!uid || !channel) {
-      return res.status(400).json({ error: "Faltan parámetros uid o channel" });
+    if (!channel) {
+      return res.status(400).json({ error: "Falta parámetro channelName (o channel)" });
+    }
+    if (!uid) {
+      return res.status(400).json({ error: "Falta parámetro uid" });
     }
 
+    // Aceptar ambos nombres de variable de entorno para compatibilidad
     const appID = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+    const appCertificate = process.env.AGORA_APP_CERT || process.env.AGORA_APP_CERTIFICATE;
 
     if (!appID || !appCertificate) {
-      return res.status(500).json({ error: "Faltan credenciales de Agora" });
+      console.error("❌ AGORA credentials missing:", { appID: !!appID, appCertificate: !!appCertificate });
+      return res.status(500).json({ error: "Faltan credenciales de Agora en el servidor" });
     }
 
     const role = RtcRole.PUBLISHER;
-    const expirationTimeInSeconds = 3600;
+    const expirationTimeInSeconds = Number(process.env.AGORA_TOKEN_EXPIRES || 3600);
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
 
     let token;
     const maybeNum = Number(uid);
     if (!Number.isNaN(maybeNum) && String(maybeNum) === String(uid)) {
-      // uid es numérico
+      // uid numérico
       token = RtcTokenBuilder.buildTokenWithUid(appID, appCertificate, channel, parseInt(uid, 10), role, privilegeExpiredTs);
-    } else if (RtcTokenBuilder.buildTokenWithUserAccount) {
-      // uid es alfanumérico -> usar user account
+    } else if (typeof RtcTokenBuilder.buildTokenWithUserAccount === "function") {
+      // uid alfanumérico -> user account
       token = RtcTokenBuilder.buildTokenWithUserAccount(appID, appCertificate, channel, uid, role, privilegeExpiredTs);
     } else {
-      return res.status(400).json({ error: "UID no numérico y buildTokenWithUserAccount no disponible" });
+      console.warn("⚠️ buildTokenWithUserAccount no disponible en esta versión de la librería");
+      return res.status(400).json({ error: "UID no numérico y buildTokenWithUserAccount no disponible en servidor" });
     }
 
     return res.json({ token, expiresAt: privilegeExpiredTs });
   } catch (e) {
-    console.error("❌ Error en /agora/token:", e);
-    return res.status(500).json({ error: e.message });
+    console.error("❌ Error en /agora/token:", e && e.message ? e.message : e);
+    return res.status(500).json({ error: e.message || "Error interno" });
   }
 });
 
@@ -532,11 +548,6 @@ app.get("/", (req, res) => {
   res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
 
-
-
-
-const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`✅ Amora Live server running on port ${PORT}`);
 });
-
