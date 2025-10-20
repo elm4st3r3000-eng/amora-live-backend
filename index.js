@@ -548,6 +548,8 @@ app.get("/", (req, res) => {
   res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
 
+const PORT = process.env.PORT || 4000;
+
 app.listen(PORT, () => {
-  console.log(`✅ Amora Live server running on port ${PORT}`);
+  console.log(`✅ Servidor Amora Live ejecutándose en el puerto ${PORT}`);
 });
