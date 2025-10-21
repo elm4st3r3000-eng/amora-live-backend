@@ -445,42 +445,52 @@ app.post("/charge", verifyAuth, async (req, res) => {
   }
 });
 
+
 // ------------------------------------------------------------
-// Agora Token
+// Agora Token (mejorado, acepta role opcional y garantiza UID numérico)
+// ------------------------------------------------------------
 app.get("/agora/token", async (req, res) => {
   try {
     const channel = req.query.channelName || req.query.channel;
     const uid = req.query.uid;
+    const requestedRole = (req.query.role || "publisher").toLowerCase(); // opcional: publisher | subscriber
 
     if (!channel) return res.status(400).json({ error: "Falta parámetro channelName (o channel)" });
     if (!uid) return res.status(400).json({ error: "Falta parámetro uid" });
 
     const appID = process.env.AGORA_APP_ID;
     const appCertificate = process.env.AGORA_APP_CERT || process.env.AGORA_APP_CERTIFICATE;
-
     if (!appID || !appCertificate) return res.status(500).json({ error: "Faltan credenciales de Agora" });
 
-    const role = RtcRole.PUBLISHER;
+    // Determinar rol correcto para token
+    const role = requestedRole === "subscriber" ? RtcRole.SUBSCRIBER : RtcRole.PUBLISHER;
+
+    // Expiración
     const expirationTimeInSeconds = Number(process.env.AGORA_TOKEN_EXPIRES || 3600);
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
 
-    let token;
+    // Forzar uid numérico si es posible
     const maybeNum = Number(uid);
+    let token;
     if (!Number.isNaN(maybeNum) && String(maybeNum) === String(uid)) {
-      token = RtcTokenBuilder.buildTokenWithUid(appID, appCertificate, channel, parseInt(uid, 10), role, privilegeExpiredTs);
+      const numericUid = parseInt(uid, 10);
+      token = RtcTokenBuilder.buildTokenWithUid(appID, appCertificate, channel, numericUid, role, privilegeExpiredTs);
+      return res.json({ token, uid: numericUid, role: role === RtcRole.PUBLISHER ? "publisher" : "subscriber", expiresAt: privilegeExpiredTs });
     } else if (typeof RtcTokenBuilder.buildTokenWithUserAccount === "function") {
+      // fallback: user account string (si la librería lo soporta)
       token = RtcTokenBuilder.buildTokenWithUserAccount(appID, appCertificate, channel, uid, role, privilegeExpiredTs);
+      return res.json({ token, uid, role: role === RtcRole.PUBLISHER ? "publisher" : "subscriber", expiresAt: privilegeExpiredTs });
     } else {
-      return res.status(400).json({ error: "UID no numérico y buildTokenWithUserAccount no disponible" });
+      return res.status(400).json({ error: "UID no numérico y buildTokenWithUserAccount no disponible en servidor" });
     }
-
-    return res.json({ token, expiresAt: privilegeExpiredTs });
   } catch (e) {
-    console.error("❌ Error en /agora/token:", e.message || e);
+    console.error("❌ Error en /agora/token:", e && e.message ? e.message : e);
     return res.status(500).json({ error: e.message || "Error interno" });
   }
 });
+
+
 
 // ------------------------------------------------------------
 // Live Rooms
