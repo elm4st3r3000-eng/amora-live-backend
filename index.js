@@ -546,7 +546,7 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
 /* ============================================================
    ❤️ MATCHMAKING ALEATORIO (videollamadas al azar o por género)
 ============================================================ */
-app.post("/match/find", verifyAuth, async (req, res) => {
+app.post("/match/cancel", verifyAuth, async (req, res) => {
   try {
     const uid = req.user.uid;
     const { genderPreference } = req.body; // "male", "female" o "any"
@@ -627,7 +627,7 @@ app.post("/match/find", verifyAuth, async (req, res) => {
 /* ============================================================
    📴 Terminar búsqueda o emparejamiento
 ============================================================ */
-app.post("/match/cancel", verifyAuth, async (req, res) => {
+app.post("/live/match/cancel", verifyAuth, async (req, res) => {
   try {
     const uid = req.user.uid;
     await db.collection("users").doc(uid).update({
