@@ -544,6 +544,107 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
+   ❤️ MATCHMAKING ALEATORIO (videollamadas al azar o por género)
+============================================================ */
+app.post("/match/find", verifyAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const { genderPreference } = req.body; // "male", "female" o "any"
+
+    const userRef = db.collection("users").doc(uid);
+    const uSnap = await userRef.get();
+    if (!uSnap.exists) return res.status(404).json({ error: "Usuario no encontrado" });
+    const user = uSnap.data();
+
+    // 🔒 Actualizamos estado del usuario
+    await userRef.update({
+      isSearching: true,
+      searchGender: genderPreference || "any",
+      searchStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // ⏳ Buscar otro usuario libre que cumpla los criterios
+    let query = db
+      .collection("users")
+      .where("isSearching", "==", true)
+      .where(admin.firestore.FieldPath.documentId(), "!=", uid);
+
+    if (genderPreference && genderPreference !== "any") {
+      query = query.where("gender", "==", genderPreference);
+    }
+
+    const snap = await query.get();
+    const matches = [];
+    snap.forEach((d) => matches.push({ id: d.id, ...d.data() }));
+
+    // ❌ Si no hay nadie disponible, esperar al siguiente intento
+    if (matches.length === 0) {
+      return res.json({
+        ok: true,
+        found: false,
+        message: "Buscando pareja...",
+      });
+    }
+
+    // ✅ Elegir uno al azar
+    const match = matches[Math.floor(Math.random() * matches.length)];
+
+    // Crear un canal compartido único
+    const channelName = `call_${uid}_${match.id}_${Date.now()}`;
+
+    // Marcar ambos como ocupados
+    await userRef.update({ isSearching: false, activeCallWith: match.id });
+    await db.collection("users").doc(match.id).update({
+      isSearching: false,
+      activeCallWith: uid,
+    });
+
+    // Registrar sesión
+    await db.collection("callMatches").add({
+      userA: uid,
+      userB: match.id,
+      channelName,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      active: true,
+    });
+
+    res.json({
+      ok: true,
+      found: true,
+      match: {
+        uid: match.id,
+        name: match.name || match.displayName || "User",
+        gender: match.gender || "unknown",
+      },
+      channelName,
+    });
+  } catch (e) {
+    console.error("❌ Error en /match/find:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ============================================================
+   📴 Terminar búsqueda o emparejamiento
+============================================================ */
+app.post("/match/cancel", verifyAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    await db.collection("users").doc(uid).update({
+      isSearching: false,
+      activeCallWith: admin.firestore.FieldValue.delete(),
+      searchGender: admin.firestore.FieldValue.delete(),
+      searchStartedAt: admin.firestore.FieldValue.delete(),
+    });
+    res.json({ ok: true, cancelled: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+/* ============================================================
    START
 ============================================================ */
 app.get("/", (req, res) => {
