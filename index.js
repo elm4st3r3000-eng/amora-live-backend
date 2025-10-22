@@ -413,8 +413,7 @@ app.all("/agora/token", verifyAuth, (req, res) => {
 
     const roleParam = req.body.role || req.query.role || "audience";
     const appID = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERT;
-
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
     if (!appID || !appCertificate) {
       return res.status(500).json({
         error: "Faltan credenciales de Agora (AGORA_APP_ID o AGORA_APP_CERT)",
