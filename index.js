@@ -5,70 +5,38 @@ import dotenv from "dotenv";
 import fs from "fs";
 import admin from "firebase-admin";
 import Stripe from "stripe";
+import bodyParser from "body-parser";
 import pkg from "agora-access-token";
 const { RtcTokenBuilder, RtcRole } = pkg;
 import paypal from "@paypal/checkout-server-sdk";
 
 dotenv.config();
-
-// ------------------------------------------------------------
-// Config básica
-// ------------------------------------------------------------
 const PORT = process.env.PORT || 4000;
-const app = express();
 
-// ------------------------------------------------------------
-// Inicializar Firebase Admin
-// ------------------------------------------------------------
-let serviceAccount = null;
+/* ============================================================
+   FIREBASE ADMIN (Render secrets)
+============================================================ */
+let serviceAccount;
+
 try {
-  const localPath = "./serviceAccountKey.json";
-  const renderPath = "/etc/secrets/serviceAccountKey.json";
+  const localPath = "./serviceAccountKey.json"; // archivo local
+  const renderPath = "/etc/secrets/serviceAccountKey.json"; // ruta en Render
   const pathToUse = fs.existsSync(renderPath) ? renderPath : localPath;
 
-  if (!fs.existsSync(pathToUse)) {
-    throw new Error(`No se encontró serviceAccountKey en ${pathToUse}`);
-  }
-
-  const raw = fs.readFileSync(pathToUse, "utf8");
-  serviceAccount = JSON.parse(raw);
-
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-
-  console.log("✅ Firebase Admin inicializado desde:", pathToUse);
+  serviceAccount = JSON.parse(fs.readFileSync(pathToUse, "utf8"));
 } catch (e) {
-  console.error("❌ Error al cargar credenciales Firebase:", e.message || e);
-  serviceAccount = null;
-  console.warn("⚠️ Firebase admin no inicializado: algunas rutas requerirán Firestore.");
+  console.error("❌ Error al cargar credenciales Firebase:", e.message);
+  process.exit(1);
 }
 
-const db = admin.firestore ? admin.firestore() : null;
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+const db = admin.firestore();
 
-// ------------------------------------------------------------
-// Middlewares
-// ------------------------------------------------------------
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-app.use(
-  cors({
-    origin: [
-      "https://amora-live-famous.netlify.app",
-      "http://localhost:3000",
-    ],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-  })
-);
-
-app.options("*", (req, res) => res.sendStatus(200));
-
-// ------------------------------------------------------------
-// Middleware: verificar idToken de Firebase
-// ------------------------------------------------------------
+/* ============================================================
+   Middleware: verificar idToken de Firebase
+============================================================ */
 async function verifyAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization || "";
@@ -76,22 +44,19 @@ async function verifyAuth(req, res, next) {
       return res.status(401).json({ error: "Token no proporcionado" });
     }
     const idToken = authHeader.split("Bearer ")[1];
-    if (!admin.apps.length) {
-      return res.status(500).json({ error: "Servicio de autenticación no disponible" });
-    }
     const decoded = await admin.auth().verifyIdToken(idToken);
     req.user = decoded;
     next();
   } catch (error) {
-    console.error("❌ Error de autenticación:", error.message || error);
+    console.error("❌ Error de autenticación:", error.message);
     return res.status(401).json({ error: "Token inválido o expirado" });
   }
 }
 
-// ------------------------------------------------------------
-// Stripe / PayPal / Constantes
-// ------------------------------------------------------------
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY || "");
+/* ============================================================
+   Stripe / PayPal / Modelo económico
+============================================================ */
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 const paypalEnv =
   process.env.PAYPAL_MODE === "live"
@@ -109,21 +74,25 @@ function coinsCostForSeconds(seconds) {
   return Math.ceil(seconds / COIN_SECONDS);
 }
 
-// ------------------------------------------------------------
-// RUTAS
-// ------------------------------------------------------------
+const app = express();
 
-// Root health
-app.get("/", (req, res) => {
-  res.send("✅ Servidor Amora Live está funcionando correctamente.");
-});
+app.use(cors({
+  origin: [
+    "https://amora-live-famous.netlify.app",
+    "http://localhost:3000"
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
+}));
 
-// ------------------------------------------------------------
-// Bono diario
+
+
+/* ============================================================
+   RUTA: bono diario (usa uid del token)
+============================================================ */
 app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
-
     const uid = req.user.uid;
     const userRef = db.collection("users").doc(uid);
     const uSnap = await userRef.get();
@@ -140,8 +109,12 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
     const now = new Date();
     const diffDays = Math.floor((now - createdDate) / (1000 * 60 * 60 * 24)) + 1;
 
-    if (diffDays > 3) return res.status(400).json({ error: "Periodo de bonos expirado (3 días)" });
-    if (user.lastBonusDay && user.lastBonusDay >= diffDays) return res.status(400).json({ error: "Bono ya reclamado hoy" });
+    if (diffDays > 3) {
+      return res.status(400).json({ error: "Periodo de bonos expirado (3 días)" });
+    }
+    if (user.lastBonusDay && user.lastBonusDay >= diffDays) {
+      return res.status(400).json({ error: "Bono ya reclamado hoy" });
+    }
 
     let bonus = { coins: 0, freeCallSeconds: 0, freeLiveSeconds: 0 };
     if (diffDays === 1) bonus = { coins: 5, freeCallSeconds: 20, freeLiveSeconds: 60 };
@@ -172,26 +145,28 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// Bono inicial
+/* ============================================================
+   RUTA: bono inicial controlado (1 vez, configurable)
+   CONFIG: INITIAL_BONUS_COINS, INITIAL_FREE_CALL_SECONDS, INITIAL_FREE_LIVE_SECONDS
+============================================================ */
 app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
-
     const uid = req.user.uid;
     const userRef = db.collection("users").doc(uid);
     const uSnap = await userRef.get();
     if (!uSnap.exists) return res.status(404).json({ error: "Usuario no encontrado" });
     const user = uSnap.data();
 
-    if (user.initialBonusGranted) return res.status(400).json({ error: "Bono inicial ya otorgado" });
+    if (user.initialBonusGranted) {
+      return res.status(400).json({ error: "Bono inicial ya otorgado" });
+    }
 
     const initialCoins = Number(process.env.INITIAL_BONUS_COINS || 0);
     const initialFreeCallSeconds = Number(process.env.INITIAL_FREE_CALL_SECONDS || 0);
     const initialFreeLiveSeconds = Number(process.env.INITIAL_FREE_LIVE_SECONDS || 0);
 
     if (initialCoins === 0 && initialFreeCallSeconds === 0 && initialFreeLiveSeconds === 0) {
-      return res.status(200).json({ ok: true, message: "No hay bono inicial configurado." });
+      return res.status(200).json({ ok: true, message: "No hay bono inicial configurado en el servidor." });
     }
 
     const updates = {};
@@ -224,16 +199,16 @@ app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// Llamadas 1 a 1
+/* ============================================================
+   📞 Llamadas 1 a 1 (callerId debe coincidir con token)
+============================================================ */
 app.post("/call/use", verifyAuth, async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
-
     const { callerId, calleeId, secondsUsed } = req.body;
     if (!callerId || !calleeId || !secondsUsed)
       return res.status(400).json({ error: "Faltan parámetros" });
 
+    // seguridad: callerId debe ser quien hace la petición
     if (callerId !== req.user.uid)
       return res.status(403).json({ error: "callerId no coincide con usuario autenticado" });
 
@@ -296,18 +271,20 @@ app.post("/call/use", verifyAuth, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// Confirmar pago
+/* ============================================================
+   💳 Confirmar pago (mejor usar webhooks en producción)
+   -> Validar que uid coincida con token
+============================================================ */
 app.post("/payment/confirm", verifyAuth, async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
-
     const { uid, amount, method } = req.body;
     if (!uid || !amount || !method) {
       return res.status(400).json({ error: "Faltan parámetros" });
     }
 
-    if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
+    if (uid !== req.user.uid) {
+      return res.status(403).json({ error: "UID no coincide con usuario autenticado" });
+    }
 
     const coinsToAdd = Number(amount) * COINS_PER_USD;
     const userRef = db.collection("users").doc(uid);
@@ -328,12 +305,14 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// Stripe y PayPal
+/* ============================================================
+   💳 Crear sesión Stripe (validar uid coincide)
+============================================================ */
 app.post("/payment/create-session", verifyAuth, async (req, res) => {
   try {
     const { amount, uid } = req.body;
     if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+
     if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
 
     const session = await stripe.checkout.sessions.create({
@@ -359,15 +338,19 @@ app.post("/payment/create-session", verifyAuth, async (req, res) => {
 
     res.json({ url: session.url });
   } catch (e) {
-    console.error("❌ Error creando sesión Stripe:", e.message || e);
+    console.error("❌ Error creando sesión de pago Stripe:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
+/* ============================================================
+   💳 Crear orden PayPal (validar uid coincide)
+============================================================ */
 app.post("/payment/create-order", verifyAuth, async (req, res) => {
   try {
     const { amount, uid } = req.body;
     if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+
     if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
 
     const request = new paypal.orders.OrdersCreateRequest();
@@ -389,114 +372,72 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
     const order = await paypalClient.execute(request);
     res.json({ id: order.result.id, links: order.result.links });
   } catch (e) {
-    console.error("❌ Error creando orden PayPal:", e.message || e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ------------------------------------------------------------
-// NUEVA RUTA: /charge (compatible frontend antiguo)
-app.post("/charge", verifyAuth, async (req, res) => {
-  try {
-    const { amount, uid, method } = req.body;
-    if (!amount || !uid || !method) return res.status(400).json({ error: "Faltan parámetros" });
-    if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
-
-    if (method === "stripe") {
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ["card"],
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: { name: `${amount*COINS_PER_USD} monedas` },
-              unit_amount: amount*100,
-            },
-            quantity: 1
-          }
-        ],
-        mode: "payment",
-        success_url: `${process.env.FRONTEND_URL}/coins?success=true&uid=${uid}&amount=${amount}`,
-        cancel_url: `${process.env.FRONTEND_URL}/coins?cancel=true`
-      });
-      return res.json({ url: session.url });
-    }
-
-    if (method === "paypal") {
-      const request = new paypal.orders.OrdersCreateRequest();
-      request.prefer("return=representation");
-      request.requestBody({
-        intent: "CAPTURE",
-        purchase_units: [{ amount: { currency_code: "USD", value: amount.toString() } }],
-        application_context: {
-          return_url: `${process.env.FRONTEND_URL}/coins?paypal_success=true&uid=${uid}&amount=${amount}`,
-          cancel_url: `${process.env.FRONTEND_URL}/coins?paypal_cancel=true`
-        }
-      });
-      const order = await paypalClient.execute(request);
-      return res.json({ id: order.result.id, links: order.result.links });
-    }
-
-    res.status(400).json({ error: "Método de pago inválido" });
-
-  } catch (e) {
-    console.error("❌ Error en /charge:", e.message || e);
+    console.error("❌ Error creando orden PayPal:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
 
-// ------------------------------------------------------------
-// Agora Token (mejorado, acepta role opcional y garantiza UID numérico)
-// ------------------------------------------------------------
-app.get("/agora/token", async (req, res) => {
-  try {
-    const channel = req.query.channelName || req.query.channel;
-    const uid = req.query.uid;
-    const requestedRole = (req.query.role || "publisher").toLowerCase(); // opcional: publisher | subscriber
 
-    if (!channel) return res.status(400).json({ error: "Falta parámetro channelName (o channel)" });
-    if (!uid) return res.status(400).json({ error: "Falta parámetro uid" });
+/* ============================================================
+   🎥 AGORA TOKEN (usa uid del token y rol dinámico)
+============================================================ */
+app.all("/agora/token", verifyAuth, (req, res) => {
+  try {
+    const channelName =
+      req.body.channelName ||
+      req.body.channel ||
+      req.query.channelName ||
+      req.query.channel;
+
+    const uid = req.user.uid;
+    const roleParam = req.body.role || req.query.role || "audience";
+
+    if (!channelName) {
+      return res.status(400).json({ error: "Falta channelName" });
+    }
 
     const appID = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERT || process.env.AGORA_APP_CERTIFICATE;
-    if (!appID || !appCertificate) return res.status(500).json({ error: "Faltan credenciales de Agora" });
+    const appCertificate = process.env.AGORA_APP_CERT;
 
-    // Determinar rol correcto para token
-    const role = requestedRole === "subscriber" ? RtcRole.SUBSCRIBER : RtcRole.PUBLISHER;
+    // ✅ Ajuste de rol dinámico (host ↔ audience)
+    let agoraRole;
+    if (roleParam === "host") agoraRole = RtcRole.PUBLISHER;
+    else agoraRole = RtcRole.SUBSCRIBER;
 
-    // Expiración
-    const expirationTimeInSeconds = Number(process.env.AGORA_TOKEN_EXPIRES || 3600);
+    const expirationTimeInSeconds = 3600;
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
 
-    // Forzar uid numérico si es posible
-    const maybeNum = Number(uid);
-    let token;
-    if (!Number.isNaN(maybeNum) && String(maybeNum) === String(uid)) {
-      const numericUid = parseInt(uid, 10);
-      token = RtcTokenBuilder.buildTokenWithUid(appID, appCertificate, channel, numericUid, role, privilegeExpiredTs);
-      return res.json({ token, uid: numericUid, role: role === RtcRole.PUBLISHER ? "publisher" : "subscriber", expiresAt: privilegeExpiredTs });
-    } else if (typeof RtcTokenBuilder.buildTokenWithUserAccount === "function") {
-      // fallback: user account string (si la librería lo soporta)
-      token = RtcTokenBuilder.buildTokenWithUserAccount(appID, appCertificate, channel, uid, role, privilegeExpiredTs);
-      return res.json({ token, uid, role: role === RtcRole.PUBLISHER ? "publisher" : "subscriber", expiresAt: privilegeExpiredTs });
-    } else {
-      return res.status(400).json({ error: "UID no numérico y buildTokenWithUserAccount no disponible en servidor" });
-    }
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appID,
+      appCertificate,
+      channelName,
+      uid,
+      agoraRole,
+      privilegeExpiredTs
+    );
+
+    res.json({
+      token,
+      expiresAt: privilegeExpiredTs,
+      role: roleParam,
+      uid,
+      channelName,
+    });
   } catch (e) {
-    console.error("❌ Error en /agora/token:", e && e.message ? e.message : e);
-    return res.status(500).json({ error: e.message || "Error interno" });
+    console.error("❌ Error en /agora/token:", e);
+    res.status(500).json({ error: e.message });
   }
 });
 
 
 
-// ------------------------------------------------------------
-// Live Rooms
+/* ============================================================
+   📡 Live Rooms (protegidas)
+============================================================ */
 app.get("/liveRooms", async (req, res) => {
   try {
-    if (!db) return res.json([]);
     const snaps = await db.collection("liveRooms").where("isActive", "==", true).get();
     const rooms = [];
     snaps.forEach((s) => rooms.push({ id: s.id, ...s.data() }));
@@ -508,13 +449,16 @@ app.get("/liveRooms", async (req, res) => {
 
 app.post("/live/create", verifyAuth, async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
-
     const { hostId, hostName, hostGender, entryPrice } = req.body;
-    if (hostId !== req.user.uid) return res.status(403).json({ error: "hostId no coincide" });
+    // hostId must match authenticated user
+    if (hostId !== req.user.uid)
+      return res.status(403).json({ error: "hostId no coincide con usuario autenticado" });
 
     const docRef = await db.collection("liveRooms").add({
-      hostId, hostName, hostGender, entryPrice,
+      hostId,
+      hostName,
+      hostGender,
+      entryPrice,
       viewers: [],
       startTime: admin.firestore.FieldValue.serverTimestamp(),
       isActive: true,
@@ -526,11 +470,8 @@ app.post("/live/create", verifyAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
 app.post("/live/enter", verifyAuth, async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ error: "Firestore no inicializado" });
-
     const { roomId } = req.body;
     const uid = req.user.uid;
     if (!roomId) return res.status(400).json({ error: "roomId requerido" });
@@ -545,7 +486,8 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
       const uSnap = await userRef.get();
       if (!uSnap.exists) return res.status(400).json({ error: "Usuario no existe" });
       const user = uSnap.data();
-      if ((user.coins || 0) < (room.entryPrice || 0)) return res.status(400).json({ error: "Saldo insuficiente" });
+      if ((user.coins || 0) < (room.entryPrice || 0))
+        return res.status(400).json({ error: "Saldo insuficiente" });
 
       await userRef.update({ coins: (user.coins || 0) - (room.entryPrice || 0) });
 
@@ -578,8 +520,11 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// START
-app.listen(PORT, () => {
-  console.log(`✅ Servidor Amora Live ejecutándose en el puerto ${PORT}`);
+/* ============================================================
+   START
+============================================================ */
+app.get("/", (req, res) => {
+  res.send("✅ Servidor Amora Live está funcionando correctamente.");
 });
+
+app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
