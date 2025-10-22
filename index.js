@@ -378,10 +378,24 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
 });
 
 
-
 /* ============================================================
-   🎥 AGORA TOKEN (usa uid del token y rol dinámico)
+   🎥 AGORA TOKEN (usa uid numérico + Firebase UID real)
+   - Convierte uid de Firebase a numérico para Agora
+   - Acepta channelName por body o query
+   - Incluye express.json() fix (para Render)
 ============================================================ */
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// 🔢 Conversor: Firebase UID (string) → UID numérico reproducible
+function numericUidFromFirebase(uid) {
+  let hash = 0;
+  for (let i = 0; i < uid.length; i++) {
+    hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
+  }
+  return hash % 1000000000; // uid < 1e9
+}
+
 app.all("/agora/token", verifyAuth, (req, res) => {
   try {
     const channelName =
@@ -390,21 +404,28 @@ app.all("/agora/token", verifyAuth, (req, res) => {
       req.query.channelName ||
       req.query.channel;
 
-    const uid = req.user.uid;
-    const roleParam = req.body.role || req.query.role || "audience";
-
     if (!channelName) {
       return res.status(400).json({ error: "Falta channelName" });
     }
 
+    const firebaseUid = req.user.uid;
+    const uid = numericUidFromFirebase(firebaseUid);
+
+    const roleParam = req.body.role || req.query.role || "audience";
     const appID = process.env.AGORA_APP_ID;
     const appCertificate = process.env.AGORA_APP_CERT;
 
-    // ✅ Ajuste de rol dinámico (host ↔ audience)
-    let agoraRole;
-    if (roleParam === "host") agoraRole = RtcRole.PUBLISHER;
-    else agoraRole = RtcRole.SUBSCRIBER;
+    if (!appID || !appCertificate) {
+      return res.status(500).json({
+        error: "Faltan credenciales de Agora (AGORA_APP_ID o AGORA_APP_CERT)",
+      });
+    }
 
+    // ✅ Asignar rol correcto
+    const agoraRole =
+      roleParam === "host" ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
+
+    // Expiración: 1 hora (3600s)
     const expirationTimeInSeconds = 3600;
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
@@ -419,17 +440,20 @@ app.all("/agora/token", verifyAuth, (req, res) => {
     );
 
     res.json({
+      ok: true,
       token,
-      expiresAt: privilegeExpiredTs,
-      role: roleParam,
-      uid,
       channelName,
+      uid, // numérico, usado por Agora
+      firebaseUid, // real de Firebase
+      role: roleParam,
+      expiresAt: privilegeExpiredTs,
     });
   } catch (e) {
     console.error("❌ Error en /agora/token:", e);
     res.status(500).json({ error: e.message });
   }
 });
+
 
 
 
