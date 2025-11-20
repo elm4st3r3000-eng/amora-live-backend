@@ -266,10 +266,22 @@ app.all("/agora/token", verifyAuth, (req, res) => {
     const firebaseUid = req.user.uid;
     const agoraUid = numericUidFromFirebase(firebaseUid);
 
+<<<<<<< HEAD
     const role =
       req.body.role === "host"
         ? RtcRole.PUBLISHER
         : RtcRole.SUBSCRIBER;
+=======
+    const roleParam = req.body.role || req.query.role || "audience";
+    const appID = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERT;
+
+    if (!appID || !appCertificate) {
+      return res.status(500).json({
+        error: "Faltan credenciales de Agora (AGORA_APP_ID o AGORA_APP_CERT)",
+      });
+    }
+>>>>>>> 8dfa883 (Restaurar index.js a versión funcional estable)
 
     const expiration = Math.floor(Date.now() / 1000) + 3600;
 
@@ -349,6 +361,7 @@ app.post("/webhook/stripe", raw({ type: "application/json" }), async (req, res) 
   }
 });
 
+
 // ============================================================
 //  RUN SERVER
 // ============================================================
@@ -356,3 +369,13 @@ app.post("/webhook/stripe", raw({ type: "application/json" }), async (req, res) 
 app.listen(PORT, () =>
   console.log(`🚀 Amora Live corriendo en puerto ${PORT}`)
 );
+=======
+/* ============================================================
+   START
+============================================================ */
+app.get("/", (req, res) => {
+  res.send("✅ Servidor Amora Live está funcionando correctamente.");
+});
+
+app.listen(PORT, () => console.log("✅ Amora Live server running on port", PORT));
+>>>>>>> 8dfa883 (Restaurar index.js a versión funcional estable)
