@@ -94,6 +94,7 @@ app.use(
     origin: [
       "https://amora-live-famous.netlify.app",
       "http://localhost:3000",
+      "https://super-academia-musical.netlify.app"
     ],
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type", "Authorization"],
