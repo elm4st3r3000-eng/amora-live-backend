@@ -14,7 +14,7 @@ dotenv.config();
 const PORT = process.env.PORT || 4000;
 
 /* ============================================================
-   FIREBASE ADMIN (Render secrets)
+   FIREBASE ADMIN
 ============================================================ */
 let serviceAccount;
 
@@ -91,7 +91,7 @@ app.use(cors({
 
 
 /* ============================================================
-   RUTA: bono diario (usa uid del token)
+   RUTA: bono diario
 ============================================================ */
 app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
   try {
@@ -148,8 +148,7 @@ app.post("/user/claim-daily-bonus", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   RUTA: bono inicial controlado (1 vez, configurable)
-   CONFIG: INITIAL_BONUS_COINS, INITIAL_FREE_CALL_SECONDS, INITIAL_FREE_LIVE_SECONDS
+   RUTA: bono inicial controlado
 ============================================================ */
 app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
   try {
@@ -202,7 +201,7 @@ app.post("/user/grant-initial-bonus", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   📞 Llamadas 1 a 1 (callerId debe coincidir con token)
+   📞 Llamadas 1 a 1
 ============================================================ */
 app.post("/call/use", verifyAuth, async (req, res) => {
   try {
@@ -274,9 +273,8 @@ app.post("/call/use", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   💳 Confirmar pago (mejor usar webhooks en producción)
-   -> Validar que uid coincida con token
-============================================================ */
+   💳 Confirmar pago
+  ============================================================ */
 app.post("/payment/confirm", verifyAuth, async (req, res) => {
   try {
     const { uid, amount, method } = req.body;
@@ -308,7 +306,7 @@ app.post("/payment/confirm", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   💳 Crear sesión Stripe (validar uid coincide)
+   💳 Crear sesión Stripe 
 ============================================================ */
 app.post("/payment/create-session", verifyAuth, async (req, res) => {
   try {
@@ -346,7 +344,7 @@ app.post("/payment/create-session", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   💳 Crear orden PayPal (validar uid coincide)
+   💳 Crear orden PayPal 
 ============================================================ */
 app.post("/payment/create-order", verifyAuth, async (req, res) => {
   try {
@@ -381,10 +379,7 @@ app.post("/payment/create-order", verifyAuth, async (req, res) => {
 
 
 /* ============================================================
-   🎥 AGORA TOKEN (usa uid numérico + Firebase UID real)
-   - Convierte uid de Firebase a numérico para Agora
-   - Acepta channelName por body o query
-   - Incluye express.json() fix (para Render)
+   🎥 AGORA TOKEN 
 ============================================================ */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -459,7 +454,7 @@ app.all("/agora/token", verifyAuth, (req, res) => {
 
 
 /* ============================================================
-   📡 Live Rooms (protegidas)
+   📡 Live Rooms 
 ============================================================ */
 app.get("/liveRooms", async (req, res) => {
   try {
@@ -546,7 +541,7 @@ app.post("/live/enter", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   ❤️ MATCHMAKING ALEATORIO (videollamadas al azar o por género)
+   ❤️ MATCHMAKING ALEATORIO 
 ============================================================ */
 app.post("/match/cancel", verifyAuth, async (req, res) => {
   try {
