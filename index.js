@@ -641,6 +641,45 @@ app.post("/live/match/cancel", verifyAuth, async (req, res) => {
 
 
 
+
+/* ============================================================
+   RUTA: USER ME (datos del usuario autenticado)
+============================================================ */
+app.get("/user/me", verifyAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const userRef = db.collection("users").doc(uid);
+    const snap = await userRef.get();
+
+    if (!snap.exists)
+      return res.status(404).json({ error: "Usuario no encontrado" });
+
+    res.json({ uid, ...snap.data() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+
+/* ============================================================
+   RUTA: STORE PRODUCTS
+============================================================ */
+app.get("/store/products", async (req, res) => {
+  // Puedes leer productos desde Firebase o desde un JSON local
+  const products = [
+    { id: "basic", name: "Paquete Básico", coins: 20, price: 2.99 },
+    { id: "pro", name: "Paquete Pro", coins: 60, price: 6.99 },
+    { id: "mega", name: "Paquete Mega", coins: 120, price: 9.99 },
+  ];
+
+  res.json(products);
+});
+
+
+
+
 /* ============================================================
    START
 ============================================================ */
