@@ -411,6 +411,67 @@ if (Number(paidUsd) !== Number(orderData.usd)) {
 
 
 
+app.post("/store/checkout", verifyAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const { cart } = req.body;
+
+    if (!cart || cart.length === 0) {
+      return res.status(400).json({ error: "Carrito vacío" });
+    }
+
+    const userRef = db.collection("users").doc(uid);
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+      return res.status(404).json({ error: "Usuario no existe" });
+    }
+
+    const user = userSnap.data();
+
+    const totalCoins = cart.reduce(
+      (sum, p) => sum + Number(p.priceCoins),
+      0
+    );
+
+    if ((user.coins || 0) < totalCoins) {
+      return res.status(400).json({
+        error: "Saldo insuficiente",
+        required: totalCoins,
+        available: user.coins || 0,
+      });
+    }
+
+    // 🔻 Descontar monedas
+    await userRef.update({
+      coins: (user.coins || 0) - totalCoins,
+      ownedProducts: admin.firestore.FieldValue.arrayUnion(
+        ...cart.map((p) => p.id)
+      ),
+    });
+
+    // 🧾 Registrar transacción
+    await db.collection("transactions").add({
+      uid,
+      type: "store_purchase",
+      coinsSpent: totalCoins,
+      products: cart.map((p) => ({
+        id: p.id,
+        title: p.title,
+        priceCoins: p.priceCoins,
+      })),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ Error store checkout:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
 
 
 
