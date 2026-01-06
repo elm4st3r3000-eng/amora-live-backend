@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import fs from "fs";
 import admin from "firebase-admin";
 import Stripe from "stripe";
-import bodyParser from "body-parser";
+
 import pkg from "agora-access-token";
 const { RtcTokenBuilder, RtcRole } = pkg;
 import paypal from "@paypal/checkout-server-sdk";
@@ -75,7 +75,8 @@ function coinsCostForSeconds(seconds) {
 }
 
 const app = express();
-
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(cors({
   origin: [
     "https://amora-live-famous.netlify.app",
@@ -273,39 +274,6 @@ app.post("/call/use", verifyAuth, async (req, res) => {
 });
 
 /* ============================================================
-   💳 Confirmar pago
-  ============================================================ */
-app.post("/payment/confirm", verifyAuth, async (req, res) => {
-  try {
-    const { uid, amount, method } = req.body;
-    if (!uid || !amount || !method) {
-      return res.status(400).json({ error: "Faltan parámetros" });
-    }
-
-    if (uid !== req.user.uid) {
-      return res.status(403).json({ error: "UID no coincide con usuario autenticado" });
-    }
-
-    const coinsToAdd = Number(amount) * COINS_PER_USD;
-    const userRef = db.collection("users").doc(uid);
-    await userRef.update({ coins: admin.firestore.FieldValue.increment(coinsToAdd) });
-
-    await db.collection("transactions").add({
-      uid,
-      amount,
-      coins: coinsToAdd,
-      type: `${method}_topup`,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    res.json({ ok: true, coinsToAdd });
-  } catch (e) {
-    console.error("❌ Error en /payment/confirm:", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/* ============================================================
    💳 Crear sesión Stripe 
 ============================================================ */
 app.post("/payment/create-session", verifyAuth, async (req, res) => {
@@ -343,46 +311,114 @@ app.post("/payment/create-session", verifyAuth, async (req, res) => {
   }
 });
 
-/* ============================================================
-   💳 Crear orden PayPal 
-============================================================ */
-app.post("/payment/create-order", verifyAuth, async (req, res) => {
+app.post("/payment/paypal/create", verifyAuth, async (req, res) => {
   try {
-    const { amount, uid } = req.body;
-    if (!amount || !uid) return res.status(400).json({ error: "Faltan parámetros" });
+    const { usd } = req.body;
+    const uid = req.user.uid;
 
-    if (uid !== req.user.uid) return res.status(403).json({ error: "UID no coincide" });
+    if (!usd) return res.status(400).json({ error: "Monto requerido" });
 
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer("return=representation");
     request.requestBody({
       intent: "CAPTURE",
-      purchase_units: [
-        {
-          amount: { currency_code: "USD", value: amount.toString() },
-          description: `${amount * COINS_PER_USD} monedas Amora Live`,
-        },
-      ],
+      purchase_units: [{
+        amount: { currency_code: "USD", value: usd.toString() },
+        description: `${usd * COINS_PER_USD} monedas Amora`,
+      }],
       application_context: {
-        return_url: `${process.env.FRONTEND_URL}/coins?paypal_success=true&uid=${uid}&amount=${amount}`,
-        cancel_url: `${process.env.FRONTEND_URL}/coins?paypal_cancel=true`,
+        return_url: `${process.env.FRONTEND_URL}/paypal/success`,
+        cancel_url: `${process.env.FRONTEND_URL}/coins`,
       },
     });
 
     const order = await paypalClient.execute(request);
-    res.json({ id: order.result.id, links: order.result.links });
+
+    // 🔐 Guardar orden pendiente
+    await db.collection("paypalOrders").doc(order.result.id).set({
+      uid,
+      usd,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      status: "created",
+    });
+
+    const approveUrl = order.result.links.find(l => l.rel === "approve")?.href;
+
+    res.json({ approveUrl });
   } catch (e) {
-    console.error("❌ Error creando orden PayPal:", e.message);
+    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
 
+app.post("/payment/paypal/capture", verifyAuth, async (req, res) => {
+  try {
+    const { orderId } = req.body;
+    const uid = req.user.uid;
+	
+    const orderSnap = await db.collection("paypalOrders").doc(orderId).get();
+    if (!orderSnap.exists) return res.status(404).json({ error: "Orden no encontrada" });
+
+    const orderData = orderSnap.data();
+    if (orderData.uid !== uid) return res.status(403).json({ error: "Orden no pertenece al usuario" });
+	if (orderData.status === "completed")
+  return res.status(400).json({ error: "Orden ya procesada" });
+   const request = new paypal.orders.OrdersCaptureRequest(orderId);
+const capture = await paypalClient.execute(request);
+
+if (capture.result.status !== "COMPLETED") {
+  return res.status(400).json({ error: "Pago no completado" });
+}
+
+// 🔒 VALIDAR MONTO REAL COBRADO
+const paidUsd =
+  capture.result.purchase_units[0].payments.captures[0].amount.value;
+
+if (Number(paidUsd) !== Number(orderData.usd)) {
+  return res.status(400).json({ error: "Monto no coincide" });
+}
+
+    const coinsToAdd = orderData.usd * COINS_PER_USD;
+
+    await db.collection("users").doc(uid).update({
+      coins: admin.firestore.FieldValue.increment(coinsToAdd),
+    });
+
+    await db.collection("paypalOrders").doc(orderId).update({
+      status: "completed",
+      completedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    await db.collection("transactions").add({
+      uid,
+      usd: orderData.usd,
+      coins: coinsToAdd,
+      type: "paypal_topup",
+      orderId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ ok: true, coinsAdded: coinsToAdd });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+
 /* ============================================================
    🎥 AGORA TOKEN 
 ============================================================ */
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
 
 // 🔢 Conversor: Firebase UID (string) → UID numérico reproducible
 function numericUidFromFirebase(uid) {
